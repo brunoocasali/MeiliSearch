@@ -114,11 +114,12 @@ impl Store {
         from: Option<TaskId>,
         filter: Option<TaskFilter>,
         limit: Option<usize>,
+        until: Option<TaskId>,
     ) -> Result<Vec<Task>> {
         let iter: Box<dyn Iterator<Item = StdResult<_, heed::Error>>> = match filter {
             Some(filter) => {
                 let iter = self
-                    .compute_candidates(txn, filter)?
+                    .compute_candidates(txn, filter, until)?
                     .into_iter()
                     .skip_while(|&id| from.map(|from| from == id).unwrap_or_default())
                     .filter_map(|id| self.tasks.get(txn, &BEU64::new(id)).transpose());
@@ -150,6 +151,7 @@ impl Store {
         &self,
         txn: &heed::RoTxn,
         filter: TaskFilter,
+        until: Option<TaskId>,
     ) -> Result<BTreeSet<TaskId>> {
         let mut candidates = BTreeSet::new();
         if let Some(indexes) = filter.indexes {
@@ -161,18 +163,24 @@ impl Store {
                 index_uid.push(0);
                 self.uids_task_ids
                     .remap_key_type::<ByteSlice>()
-                    .prefix_iter(txn, &index_uid)?
-                    .try_fold(
-                        &mut candidates,
-                        |candidates, entry| -> StdResult<_, heed::Error> {
-                            let (key, _) = entry?;
-                            let (_, id) = IndexUidTaskIdCodec::bytes_decode(key)
-                                .ok_or(heed::Error::Decoding)?;
-                            candidates.insert(id);
-
-                            Ok(candidates)
-                        },
-                    )?;
+                    .rev_prefix_iter(txn, &index_uid)?
+                    .map(|entry| -> StdResult<_, heed::Error> {
+                        let (key, _) = entry?;
+                        let (_, id) =
+                            IndexUidTaskIdCodec::bytes_decode(key).ok_or(heed::Error::Decoding)?;
+                        Ok(id)
+                    })
+                    .take_while(|entry| {
+                        entry
+                            .as_ref()
+                            .ok()
+                            .zip(until)
+                            .map(|(key, until)| *key > until)
+                            .unwrap_or(true) // if we encountered an error we returns true to collect it later
+                    })
+                    .try_for_each::<_, StdResult<(), heed::Error>>(|id| {
+                        Ok(drop(candidates.insert(id?)))
+                    })?;
             }
         }
 
@@ -248,9 +256,10 @@ pub mod test {
             from: Option<TaskId>,
             filter: Option<TaskFilter>,
             limit: Option<usize>,
+            until: Option<TaskId>,
         ) -> Result<Vec<Task>> {
             match self {
-                MockStore::Real(index) => index.list_tasks(txn, from, filter, limit),
+                MockStore::Real(index) => index.list_tasks(txn, from, filter, limit, until),
                 MockStore::Fake(_) => todo!(),
             }
         }

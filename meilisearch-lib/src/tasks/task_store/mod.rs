@@ -97,11 +97,7 @@ impl TaskStore {
         self.pending_queue.read().await.front().copied()
     }
 
-    pub async fn get_task(
-        &self,
-        id: TaskId,
-        filter: Option<TaskFilter>,
-    ) -> Result<Task> {
+    pub async fn get_task(&self, id: TaskId, filter: Option<TaskFilter>) -> Result<Task> {
         let store = self.store.clone();
         let task = tokio::task::spawn_blocking(move || -> Result<_> {
             let txn = store.rtxn()?;
@@ -112,7 +108,10 @@ impl TaskStore {
         .ok_or(TaskError::UnexistingTask(id))?;
 
         match filter {
-            Some(filter) => filter.pass(&task).then(|| task).ok_or(TaskError::UnexistingTask(id)),
+            Some(filter) => filter
+                .pass(&task)
+                .then(|| task)
+                .ok_or(TaskError::UnexistingTask(id)),
             None => Ok(task),
         }
     }
@@ -147,13 +146,13 @@ impl TaskStore {
         filter: Option<TaskFilter>,
         limit: Option<usize>,
         offset: Option<TaskId>,
-        _until: Option<TaskId>,
+        until: Option<TaskId>,
     ) -> Result<Vec<Task>> {
         let store = self.store.clone();
 
         tokio::task::spawn_blocking(move || {
             let txn = store.rtxn()?;
-            let tasks = store.list_tasks(&txn, offset, filter, limit)?;
+            let tasks = store.list_tasks(&txn, offset, filter, limit, until)?;
             Ok(tasks)
         })
         .await?
@@ -197,17 +196,10 @@ pub mod test {
             }
         }
 
-        pub async fn get_task(
-            &self,
-            id: TaskId,
-            filter: Option<TaskFilter>,
-        ) -> Result<Task> {
+        pub async fn get_task(&self, id: TaskId, filter: Option<TaskFilter>) -> Result<Task> {
             match self {
                 Self::Real(s) => s.get_task(id, filter).await,
-                Self::Mock(m) => unsafe {
-                    m.get::<_, Result<Task>>("get_task")
-                        .call((id, filter))
-                },
+                Self::Mock(m) => unsafe { m.get::<_, Result<Task>>("get_task").call((id, filter)) },
             }
         }
 
